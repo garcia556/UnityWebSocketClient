@@ -11,15 +11,12 @@ namespace UnityWebSocket
 
 		public static int CLIENT_ID = 1;
 
-		public GameObject ComponentPrefab;
-
 		// input
 		private string url;
-		private bool stopTime;
+		private bool freezeTimeDuringReconnect;
 		private System.Action<string> onMessage;
 		private int reconnectTriesMax;
 		private int reconnectInterval;
-		private bool debug;
 
 		// socket
 		private WebSocket Server;
@@ -41,46 +38,21 @@ namespace UnityWebSocket
 		}
 
 		// internal
-		private ClientComponent comp;
+		private float timeScaleSaved;
 
 		public Client(
 			string url,
 			System.Action<string> onMessage,
 			bool freezeTimeReconnecting,
 			int reconnectTriesMax,
-			int reconnectInterval,
-			bool debug
+			int reconnectInterval
 			)
 		{
 			this.url = url;
-			this.stopTime = freezeTimeReconnecting;
 			this.onMessage = onMessage;
+			this.freezeTimeDuringReconnect = freezeTimeReconnecting;
 			this.reconnectTriesMax = reconnectTriesMax;
 			this.reconnectInterval = reconnectInterval;
-			this.debug = debug;
-		}
-
-		public IEnumerator Connect()
-		{
-			var compSpawn = new GameObject().AddComponent<ClientComponentSpawn>();
-			while ((this.comp = compSpawn.Component) == null) // wait while component is created
-				yield return new WaitForEndOfFrame();
-			if (this.debug)
-				this.comp.EnableUI(this.url, this.Send);
-			GameObject.Destroy(compSpawn.gameObject); // cleanup
-
-			// networking
-			this.Server = new WebSocket(this.url);
-			this.SetStatus("Connecting ...");
-			yield return this.Server.Connect();
-			if (this.IsError)
-			{
-				this.SetErrorStatus("Connection failed", this.ErrorMessage);
-				yield break;
-			}
-
-			this.SetErrorStatus("Connected", "");
-			this.comp.StartCoroutine(this.RecvLoop());
 		}
 
 		public void SendBinary(byte[] data)
@@ -95,57 +67,75 @@ namespace UnityWebSocket
 			this.Server.SendString(data);
 		}
 
-		private void SetStatus(string status) { this.comp.SetStatus(status); }
-		private void SetError(string status) { this.comp.SetError(status); }
-		private void SetErrorStatus(string status, string error) { this.SetStatus(status); this.SetError(error); }
-
-		private IEnumerator RecvLoop()
+		public IEnumerator Start()
 		{
+			this.Server = new WebSocket(this.url); // create socket instance
+			yield return this.Server.Connect();
+
+			// start receiving loop
 			while (true)
 			{
-				this.SetStatus("Recv: Receiving data from socket ...");
-				string data = this.Server.RecvString();
-
-				if (this.IsError)
+#if UNITYWEBSOCKET_DEBUG
+				Debug.Log("Recv: Receiving data from socket ...");
+#endif
+				string data = this.Server.RecvString(); // try read from socket
+				if (!this.IsError) // got data
 				{
-					this.SetErrorStatus("Recv: Error while receiving data", this.ErrorMessage);
-					this.comp.StartCoroutine(this.Reconnect());
-					yield break;
+					if (!string.IsNullOrEmpty(data))
+						this.onMessage.Invoke(data); // process data
+					yield return new WaitForEndOfFrame();
+					continue;
 				}
 
-				if (!string.IsNullOrEmpty(data))
-					this.onMessage.Invoke(data);
+#if UNITYWEBSOCKET_DEBUG
+				Debug.LogError(this.ErrorMessage); // error processing
+#endif
+				this.FreezeTime();
+				for (int i = 1; i <= this.reconnectTriesMax; i++) // reconnect loop
+				{
+					yield return this.WaitForReconnectDelay(i);
+					yield return this.Server.Connect();
+					if (!this.IsError) // connection successful -> exit from reconnect loop
+						break;
+				}
+				this.UnfreezeTime();
 
-				yield return new WaitForEndOfFrame();
+				if (!this.IsError) // connection successful -> proceed with receiving loop
+					continue;
+#if UNITYWEBSOCKET_DEBUG
+				Debug.LogWarning("Reconnect failed, client stopped");
+#endif
+				break;
 			}
 		}
 
-		public IEnumerator Reconnect()
+		private IEnumerator WaitForReconnectDelay(int tryNum)
 		{
-			float timeScaleOld = Time.timeScale;
-			if (this.stopTime)
-				Time.timeScale = 0.0f;
-
-			// tries
-			for (int i = 1; i <= this.reconnectTriesMax; i++)
+			// wait for the next try
+			for (int sec = this.reconnectInterval; sec > 0; sec--)
 			{
-				// wait for the next try
-				for (int sec = this.reconnectInterval; sec > 0; sec--)
-				{
-					this.SetStatus(string.Format("Reconnect: try {0} / {1} in {2} seconds ...", i, this.reconnectTriesMax, sec));
-					yield return new WaitForSecondsRealtime(1);
-				}
-
-				yield return this.Connect();
-				if (!this.IsError) // reconnected successfully
-				{
-					if (this.stopTime)
-						Time.timeScale = timeScaleOld;
-					yield break;
-				}
+#if UNITYWEBSOCKET_DEBUG
+				Debug.Log(string.Format("Reconnect: try {0} / {1} in {2} seconds ...", tryNum, this.reconnectTriesMax, sec));
+#endif
+				yield return new WaitForSecondsRealtime(1);
 			}
+		}
 
-			this.SetErrorStatus("Client stopped", "Reconnect tries failed");
+		private void FreezeTime()
+		{
+			if (!this.freezeTimeDuringReconnect)
+				return;
+
+			this.timeScaleSaved = Time.timeScale;
+			Time.timeScale = 0.0f;
+		}
+
+		private void UnfreezeTime()
+		{
+			if (!this.freezeTimeDuringReconnect)
+				return;
+
+			Time.timeScale = this.timeScaleSaved;
 		}
 	}
 }

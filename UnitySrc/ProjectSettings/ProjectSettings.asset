@@ -570,7 +570,7 @@ PlayerSettings:
   webGLUseWasm: 0
   webGLCompressionFormat: 0
   scriptingDefineSymbols:
-    1: 
+    1: UNITYWEBSOCKET_DEBUG
     2: 
     13: 
   platformArchitecture:
